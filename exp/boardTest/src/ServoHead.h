@@ -20,8 +20,8 @@
 #define UART0_RX 1
 
 //UART 1
-#define UART1_TX 6 //label Trig
-#define UART1_RX 7 //label echo
+#define UART1_TX 8 //label Trig
+#define UART1_RX 9 //label echo
 
 
 #define GP_WS2812B	5
