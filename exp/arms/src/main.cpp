@@ -23,7 +23,7 @@ extern "C" {
 #include "HeadShake.h"
 
 
-#define LED_LEN 14
+#define LED_LEN 7
 
 PicoLed::PicoLedController xNeopixels = PicoLed::addLeds<PicoLed::WS2812B>(
 					pio1, 0,
@@ -121,6 +121,32 @@ int main()
 	Arm xRight(&servoD, false);
 
 	sleep_ms(3000);
+
+	Head xHead(&servoB, &servoA);
+	ArmWave xWaveLeft(&xLeft, 3);
+	ArmWave xWaveRight(&xRight, 3);
+	ArmHug xHugAnim(&xLeft, &xRight, 4);
+	HeadNod xNodAnim(&xHead, 3);
+	HeadShake xShakeAnim(&xHead, 3);
+
+	Anim *anims[] = { &xWaveLeft, &xWaveRight, &xHugAnim, &xNodAnim, &xShakeAnim };
+	const char *names[] = { "Wave left", "Wave right", "Hug", "Nod", "Shake" };
+	size_t colourIndex = 0;
+
+	for (;;){
+		for (size_t i = 0; i < sizeof(anims) / sizeof(anims[0]); i++){
+			xNeopixels.fill(colours[colourIndex]);
+			xNeopixels.show();
+			colourIndex = (colourIndex + 1) % COLOUR_COUNT;
+			printf("%s\n", names[i]);
+			anims[i]->start();
+			while (anims[i]->isRunning()){
+				anims[i]->poll();
+				sleep_ms(10);
+			}
+			sleep_ms(1000);
+		}
+	}
 
 #if 0
 	Head xHead(&servoB, &servoA);

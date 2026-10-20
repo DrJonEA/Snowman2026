@@ -14,6 +14,7 @@
 extern "C" {
 #include "servo.h"
 }
+#include "Kinematics.h"
 
 enum HeadPos {
 	HeadCentre,
@@ -32,9 +33,11 @@ public:
 	bool moveRad(float pan, float tilt, uint ms, ease_fn_t ease_fn = NULL, bool approx = false);
 	bool movePanRad(float pan, uint ms, ease_fn_t ease_fn = NULL, bool approx = false);
 	bool moveTiltRad(float tilt, uint ms, ease_fn_t ease_fn = NULL, bool approx = false);
+	bool movePos(float x, float y, float z, uint ms, ease_fn_t ease_fn = NULL, bool approx = false);
 
 	float getPanRad();
 	float getTiltRad();
+	void getPos(float &x, float &y, float &z);
 
 	// Tilt limits as offsets from centre, for building custom moves.
 	float getTiltUpRad();
@@ -46,6 +49,7 @@ private:
 
 	Servo *pPan;
 	Servo *pTilt;
+	Kin::Chain xChain;
 	float xPanMin, xPanMax;
 	float xTiltMin, xTiltMax;
 };

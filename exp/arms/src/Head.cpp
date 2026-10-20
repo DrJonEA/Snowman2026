@@ -15,6 +15,13 @@
 // Tilt servo is mounted inverted: positive tilt (up) lowers the servo angle.
 #define TILT_DIR      (-1.0f)
 
+// Measured offsets in metres. Body frame: X forward, Y left, Z up.
+#define HEAD_PAN_Z       0.13f
+#define HEAD_TILT_X     -0.02f
+#define HEAD_TILT_Z      0.017f
+#define HEAD_EFFECTOR_X  0.035f
+#define HEAD_EFFECTOR_Z  0.04f
+
 Head::Head(Servo *pan, Servo *tilt) {
 	pPan = pan;
 	pTilt = tilt;
@@ -22,6 +29,13 @@ Head::Head(Servo *pan, Servo *tilt) {
 	xPanMax = PAN_MAX_RAD;
 	xTiltMin = TILT_MIN_RAD;
 	xTiltMax = TILT_MAX_RAD;
+
+	// Joint angles equal pan/tilt radians: +pan is left, +tilt is up (axis -Y).
+	xChain.add(std::make_unique<Kin::FixedJoint>(Kin::Vec3(0.0f, 0.0f, HEAD_PAN_Z)));
+	xChain.add(std::make_unique<Kin::RevoluteJoint>(Kin::Vec3::UnitZ()));
+	xChain.add(std::make_unique<Kin::FixedJoint>(Kin::Vec3(HEAD_TILT_X, 0.0f, HEAD_TILT_Z)));
+	xChain.add(std::make_unique<Kin::RevoluteJoint>(-Kin::Vec3::UnitY()));
+	xChain.add(std::make_unique<Kin::FixedJoint>(Kin::Vec3(HEAD_EFFECTOR_X, 0.0f, HEAD_EFFECTOR_Z)));
 
 	servo_set_rad(pPan, CENTRE_RAD);
 	servo_set_rad(pTilt, CENTRE_RAD);
@@ -87,6 +101,23 @@ float Head::getPanRad() {
 
 float Head::getTiltRad() {
 	return TILT_DIR * ((pTilt->_current_deg * M_PI / 180) - CENTRE_RAD);
+}
+
+bool Head::movePos(float x, float y, float z, uint ms, ease_fn_t ease_fn, bool approx) {
+	float q[2] = { getPanRad(), getTiltRad() };
+	bool reached = xChain.ik(Kin::Vec3(x, y, z), q);
+	if (!reached && !approx) {
+		return false;
+	}
+	return moveRad(q[0], q[1], ms, ease_fn, approx);
+}
+
+void Head::getPos(float &x, float &y, float &z) {
+	float q[2] = { getPanRad(), getTiltRad() };
+	Kin::Vec3 p = xChain.position(q);
+	x = p.x();
+	y = p.y();
+	z = p.z();
 }
 
 float Head::getTiltUpRad() {

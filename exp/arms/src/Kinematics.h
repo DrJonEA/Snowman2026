@@ -62,27 +62,39 @@ private:
 	float xBendAngle;
 };
 
-// Chain with exactly one revolute joint, giving a closed-form IK.
+// Serial chain of links with any number of revolute joints (up to MAX_JOINTS).
+// Joint values are taken in the order the joints were added.
 class Chain {
 public:
+	static const size_t MAX_JOINTS = 6;
+
 	Chain();
 
 	void add(std::unique_ptr<Link> link);
 	void add(std::unique_ptr<RevoluteJoint> joint);
 
-	// Tip frame for joint angle q.
+	size_t jointCount() const;
+
+	// Tip frame; q holds one value per joint.
+	Tf fk(const float *q) const;
+	Vec3 position(const float *q) const;
 	Tf fk(float q) const;
 	Vec3 position(float q) const;
 
-	// Joint angle that brings the tip closest to target (base frame).
+	// Single-joint chains only: closed-form joint angle bringing the tip closest to target.
 	// Returns true if the tip lands within tol metres of target.
-	// Returns false without touching q if the chain has no joint or the target is on the joint axis.
+	// Returns false without touching q if the chain has not exactly one joint or the target is on the joint axis.
 	bool ik(const Vec3 &target, float &q, float tol = 0.005f) const;
+
+	// Any chain: damped least squares position IK, starting from the values in q.
+	// Updates q with the closest solution found and returns true if within tol metres of target.
+	bool ik(const Vec3 &target, float *q, float tol = 0.005f, int maxIter = 50) const;
 
 private:
 	std::vector<std::unique_ptr<Link>> xLinks;
-	const RevoluteJoint *pJoint = nullptr;
-	size_t xJointIndex = 0;
+	std::vector<int> xJointOfLink;      // joint number per link, or -1
+	std::vector<const RevoluteJoint *> xJoints;
+	std::vector<size_t> xJointLink;     // link index per joint
 };
 
 } // namespace Kin
