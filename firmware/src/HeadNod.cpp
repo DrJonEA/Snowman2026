@@ -13,7 +13,7 @@ HeadNod::HeadNod(Head *head, uint nods, bool loop) : Anim(loop), pHead(head) {
 		addStep([this]() { tilt(1.0f, NOD_DOWN_MS); }, NOD_DOWN_MS);
 		addStep([this]() { tilt(0.0f, NOD_UP_MS); }, NOD_UP_MS);
 	}
-	addStep([this]() { pHead->movePosName(HeadCentre, NOD_SETTLE_MS, ease_sin); }, NOD_SETTLE_MS);
+	addStep([this]() { pHead->moveRad(0.0f, 0.0f, NOD_SETTLE_MS, ease_sin, true); }, NOD_SETTLE_MS);
 }
 
 HeadNod::~HeadNod() {

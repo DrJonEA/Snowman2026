@@ -47,7 +47,7 @@ Head::~Head() {
 bool Head::moveServo(Servo *servo, float r, float minRad, float maxRad,
 		uint ms, ease_fn_t ease_fn, bool approx) {
 	float dir = (servo == pTilt) ? TILT_DIR : 1.0f;
-	float target = dir * r + CENTRE_RAD;
+	float target = dir * r + CENTRE_RAD + (servo == pPan ? xPanBias : 0.0f);
 	if (target < minRad || target > maxRad) {
 		if (!approx) {
 			return false;
@@ -69,7 +69,7 @@ bool Head::moveTiltRad(float tilt, uint ms, ease_fn_t ease_fn, bool approx) {
 bool Head::moveRad(float pan, float tilt, uint ms, ease_fn_t ease_fn, bool approx) {
 	// Check both first so a rejected move doesn't leave one servo moved.
 	if (!approx) {
-		float p = pan + CENTRE_RAD;
+		float p = pan + xPanBias + CENTRE_RAD;
 		float t = TILT_DIR * tilt + CENTRE_RAD;
 		if (p < xPanMin || p > xPanMax || t < xTiltMin || t > xTiltMax) {
 			return false;

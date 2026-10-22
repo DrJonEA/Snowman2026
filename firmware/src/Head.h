@@ -35,6 +35,11 @@ public:
 	bool moveTiltRad(float tilt, uint ms, ease_fn_t ease_fn = NULL, bool approx = false);
 	bool movePos(float x, float y, float z, uint ms, ease_fn_t ease_fn = NULL, bool approx = false);
 
+	// Pan offset added to every pan move, so animations written around 0 rad
+	// become relative to this facing direction. Does not move the head.
+	void setPanBias(float rad) { xPanBias = rad; }
+	float getPanBias() const { return xPanBias; }
+
 	float getPanRad();
 	float getTiltRad();
 	void getPos(float &x, float &y, float &z);
@@ -50,6 +55,7 @@ private:
 	Servo *pPan;
 	Servo *pTilt;
 	Kin::Chain xChain;
+	float xPanBias = 0.0f;
 	float xPanMin, xPanMax;
 	float xTiltMin, xTiltMax;
 };

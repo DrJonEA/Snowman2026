@@ -28,6 +28,7 @@ extern "C" {
 #include "Star.h"
 #include "StarChase.h"
 #include "StarHeartbeat.h"
+#include "SnowmanBrain.h"
 
 #include "hardware/uart.h"
 #include "KW307_api.h"
@@ -97,6 +98,12 @@ float pos[POS_COUNT] = {
  * `volatile` because the callback may run from inside the UART RX path. */
 static volatile uint8_t  g_human_flag      = 0;
 static volatile uint16_t g_target_dist_cm  = 0;   /* nearest moving-target distance, cm */
+static volatile uint8_t  g_stat_valid      = 0;   /* stationary target present (state == 1) */
+static volatile int16_t  g_stat_angle_tenth = 0;  /* stationary target angle, deg x 10 */
+static volatile uint16_t g_stat_dist_cm    = 0;
+static volatile uint8_t  g_mov_valid[2]    = {0, 0};  /* moving targets (state == 1) */
+static volatile int16_t  g_mov_angle_tenth[2] = {0, 0};
+static volatile uint16_t g_mov_dist_cm[2]  = {0, 0};
 
 
 /* Fires on every radar frame. Keep short — heavy work belongs in main(). */
@@ -108,7 +115,23 @@ static void on_radar(const KW307Frame_t* f){
 
     g_human_flag     = f->human_flag ? 1u : 0u;
     g_target_dist_cm = f->moving[0].distance_cm;  /* 0 when no target */
+	if (f->stationary[0].state == 1) {
+		g_stat_angle_tenth = f->stationary[0].angle_tenth;
+		g_stat_dist_cm     = f->stationary[0].distance_cm;
+		g_stat_valid       = 1u;
+	} else {
+		g_stat_angle_tenth = 0;
+		g_stat_valid       = 0u;
+	}
 
+	for (int i = 0; i < 2; i++) {
+		bool ok = f->moving[i].state == 1;
+		g_mov_angle_tenth[i] = ok ? f->moving[i].angle_tenth : 0;
+		g_mov_dist_cm[i]     = ok ? f->moving[i].distance_cm : 0;
+		g_mov_valid[i]       = ok ? 1u : 0u;
+	}
+
+	#if 0
     printf("Frame %u Human %u \n", f->frame_index, f->human_flag);
     printf("Stationary: %ucm %.1fdeg  mag: %u  State: %u Counter: %u\n",
     		f->stationary[0].distance_cm,
@@ -127,6 +150,7 @@ static void on_radar(const KW307Frame_t* f){
 				f->moving[0].counter
 				);
     }
+    #endif
 }
 
 int setupKW307() {
@@ -199,29 +223,31 @@ int main()
 	Dance xDanceAnim(&xHead, &xLeft, &xRight);
 	WakeUp xWakeAnim(&xHead, &xLeft, &xRight);
 
-	Anim *anims[] = { &xWaveLeft, &xWaveRight, &xHugAnim, &xNodAnim, &xShakeAnim, &xLookAnim, &xDanceAnim, &xSleepAnim, &xWakeAnim };
-	const char *names[] = { "Wave left", "Wave right", "Hug", "Nod", "Shake", "Look", "Dance", "Sleep", "Wake up" };
-	size_t colourIndex = 0;
+	BrainActors actors = { &xHead, &xStar, &xChase, &xHeart,
+			&xWakeAnim, &xLookAnim, &xWaveRight, &xDanceAnim, &xSleepAnim,
+			&xNodAnim, &xShakeAnim, &xWaveLeft, &xWaveRight };
+	SnowmanBrain xBrain(actors);
+	xBrain.start();
 
 	for (;;){
-		for (size_t i = 0; i < sizeof(anims) / sizeof(anims[0]); i++){
-			xChase.setColour(colours[colourIndex]);
-			xHeart.setColour(colours[(colourIndex + 4) % COLOUR_COUNT]);
-			colourIndex = (colourIndex + 1) % COLOUR_COUNT;
-			printf("%s\n", names[i]);
-			anims[i]->start();
-			while (anims[i]->isRunning()){
-				anims[i]->poll();
-				xChase.poll();
-				xHeart.poll();
-				sleep_ms(10);
-			}
-			for (int t = 0; t < 100; t++){
-				xChase.poll();
-				xHeart.poll();
-				sleep_ms(10);
-			}
-		}
+		xBrain.updateSensor(g_human_flag != 0, g_target_dist_cm);
+		RadarTarget stat = { g_stat_valid != 0, g_stat_angle_tenth, g_stat_dist_cm };
+		RadarTarget mov0 = { g_mov_valid[0] != 0, g_mov_angle_tenth[0], g_mov_dist_cm[0] };
+		RadarTarget mov1 = { g_mov_valid[1] != 0, g_mov_angle_tenth[1], g_mov_dist_cm[1] };
+		xBrain.updateTargets(stat, mov0, mov1);
+		xBrain.poll();
+		xWaveLeft.poll();
+		xWaveRight.poll();
+		xHugAnim.poll();
+		xNodAnim.poll();
+		xShakeAnim.poll();
+		xLookAnim.poll();
+		xDanceAnim.poll();
+		xSleepAnim.poll();
+		xWakeAnim.poll();
+		xChase.poll();
+		xHeart.poll();
+		sleep_ms(10);
 	}
 
 #if 0

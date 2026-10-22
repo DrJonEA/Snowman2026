@@ -15,6 +15,8 @@ add_executable(${NAME}
         Star.cpp
         StarChase.cpp
         StarHeartbeat.cpp
+        StateMachine.cpp
+        SnowmanBrain.cpp
         )
 
 # Pull in our pico_stdlib which pulls in commonly used features
