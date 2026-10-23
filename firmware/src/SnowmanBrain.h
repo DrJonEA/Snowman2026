@@ -17,6 +17,7 @@
 #define FIRMWARE_SRC_SNOWMANBRAIN_H_
 
 #include "StateMachine.h"
+#include "RadarTarget.h"
 #include "Anim.h"
 #include "Head.h"
 #include "HeadNod.h"
@@ -34,13 +35,6 @@ enum BrainEvent : uint16_t {
 	EvSleepNow,
 	EvTargetFound,    // stationary target appeared
 	EvTargetLost
-};
-
-// One radar target as reported by the sensor.
-struct RadarTarget {
-	bool valid = false;
-	int16_t angleTenth = 0;   // degrees x 10
-	uint16_t distanceCm = 0;
 };
 
 enum TrackMode : uint8_t {
@@ -78,8 +72,7 @@ public:
 
 	// Latest radar targets. A stationary target is looked at; if there is none
 	// the nearest moving target is followed. Call every loop.
-	void updateTargets(const RadarTarget &stationary, const RadarTarget &moving0,
-			const RadarTarget &moving1);
+	void updateTarget(const RadarTarget_t &target);
 
 	StateMachine &machine() { return xSm; }
 
@@ -113,21 +106,23 @@ private:
 	uint xIdleCycles = 0;
 	uint32_t xCooldownUntilMs = 0;
 
-	// A target held across short radar dropouts, with a low-pass filtered angle.
 	struct Held {
 		bool valid = false;
 		float angleDeg = 0.0f;
-		uint16_t distanceCm = 0;
 		uint32_t seenMs = 0;
 	};
-	void updateHeld(Held &h, bool valid, int16_t angleTenth, uint16_t dist,
-			uint32_t now, uint32_t dtMs, uint32_t holdMs, uint32_t tauMs);
 
-	Held xStat;
-	Held xMov;
+	void updateHeld(Held &h, bool valid, int16_t angleTenth, uint32_t now, uint32_t holdMs);
+
+	Held xStat;   // stationary target, held briefly across radar dropouts
+	Held xMov;    // nearest moving target, latest frame only
 	TrackMode xTrackMode = TrackNone;
-	uint32_t xLastUpdateMs = 0;
 	Anim *pAttWave = nullptr;
+	uint16_t xTargetCm = 0;      // distance to the current target, 0 = unknown
+	uint32_t xPauseStartMs = 0;
+	uint32_t xPauseMs = 0;       // gap before the next gesture, set from distance
+	State *pAttNext = nullptr;   // gesture chosen for after the pause
+	State *pickGesture();
 	float xFacingRad = 1000.0f;  // 1000 = unknown
 	uint32_t xLastTurnMs = 0;
 	uint32_t xLastTelemetryMs = 0;

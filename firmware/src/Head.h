@@ -40,6 +40,9 @@ public:
 	void setPanBias(float rad) { xPanBias = rad; }
 	float getPanBias() const { return xPanBias; }
 
+	// A new move on a busy servo blocks the caller until the current one ends.
+	bool isMoving() const { return pPan->_moving || pTilt->_moving; }
+
 	float getPanRad();
 	float getTiltRad();
 	void getPos(float &x, float &y, float &z);

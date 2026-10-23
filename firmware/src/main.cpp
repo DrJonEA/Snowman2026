@@ -82,75 +82,46 @@ Servo servoE = {
     .duty_max_usec      = 2300u,
 };
 
-#define POS_COUNT 8
-float pos[POS_COUNT] = {
-		90.0,
-		45.0,
-		0.0,
-		45.0,
-		90.0,
-		135.0,
-		180.0,
-		135.0
-};
-
 /* Application-level state — set from the callback, read in main().
  * `volatile` because the callback may run from inside the UART RX path. */
-static volatile uint8_t  g_human_flag      = 0;
-static volatile uint16_t g_target_dist_cm  = 0;   /* nearest moving-target distance, cm */
-static volatile uint8_t  g_stat_valid      = 0;   /* stationary target present (state == 1) */
-static volatile int16_t  g_stat_angle_tenth = 0;  /* stationary target angle, deg x 10 */
-static volatile uint16_t g_stat_dist_cm    = 0;
-static volatile uint8_t  g_mov_valid[2]    = {0, 0};  /* moving targets (state == 1) */
-static volatile int16_t  g_mov_angle_tenth[2] = {0, 0};
-static volatile uint16_t g_mov_dist_cm[2]  = {0, 0};
+static volatile RadarTarget_t g_target     = {false, false, 0, 0};
+static volatile uint32_t g_target_seq      = 0;   /* odd while g_target is being written */
 
+static RadarTarget_t getTarget(){
+	RadarTarget_t t;
+	uint32_t s;
+	do {
+		s = g_target_seq;
+		t.valid       = g_target.valid;
+		t.moving      = g_target.moving;
+		t.angle_tenth = g_target.angle_tenth;
+		t.dist_cm     = g_target.dist_cm;
+	} while ((s & 1u) || s != g_target_seq);
+	return t;
+}
 
 /* Fires on every radar frame. Keep short — heavy work belongs in main(). */
 static void on_radar(const KW307Frame_t* f){
-    /* The frame carries the whole result: f->human_flag, both moving
-       targets (f->moving[0], f->moving[1]) and the stationary target
-       (f->stationary[0]). This demo uses only the nearest moving target;
-       read the others the same way. */
-
-    g_human_flag     = f->human_flag ? 1u : 0u;
-    g_target_dist_cm = f->moving[0].distance_cm;  /* 0 when no target */
+	/* Stationary target (state 1) wins; otherwise the nearest moving target
+	   (state 3 in the advanced reporting form). */
+	RadarTarget_t t = {false, false, 0, 0};
 	if (f->stationary[0].state == 1) {
-		g_stat_angle_tenth = f->stationary[0].angle_tenth;
-		g_stat_dist_cm     = f->stationary[0].distance_cm;
-		g_stat_valid       = 1u;
+		t = {true, false, f->stationary[0].angle_tenth, f->stationary[0].distance_cm};
 	} else {
-		g_stat_angle_tenth = 0;
-		g_stat_valid       = 0u;
+		for (int i = 0; i < 2; i++) {
+			const auto &mv = f->moving[i];
+			if (mv.state == 1 && (!t.valid || (mv.distance_cm > 0 && mv.distance_cm < t.dist_cm))) {
+				t = {true, true, mv.angle_tenth, mv.distance_cm};
+				break;
+			}
+		}
 	}
-
-	for (int i = 0; i < 2; i++) {
-		bool ok = f->moving[i].state == 1;
-		g_mov_angle_tenth[i] = ok ? f->moving[i].angle_tenth : 0;
-		g_mov_dist_cm[i]     = ok ? f->moving[i].distance_cm : 0;
-		g_mov_valid[i]       = ok ? 1u : 0u;
-	}
-
-	#if 0
-    printf("Frame %u Human %u \n", f->frame_index, f->human_flag);
-    printf("Stationary: %ucm %.1fdeg  mag: %u  State: %u Counter: %u\n",
-    		f->stationary[0].distance_cm,
-			(float)f->stationary[0].angle_tenth/ 10.0,
-			f->stationary[0].mag,
-			f->stationary[0].state,
-			f->stationary[0].counter
-			);
-    for (int i=0; i < 2; i++){
-    	 printf("Moving(%d): %ucm %.1fdeg  mag: %u  State: %u Counter: %u\n",
-    			 i,
-				f->moving[0].distance_cm,
-				(float)f->moving[0].angle_tenth/ 10.0,
-				f->moving[0].mag,
-				f->moving[0].state,
-				f->moving[0].counter
-				);
-    }
-    #endif
+	g_target_seq = g_target_seq + 1;
+	g_target.valid = t.valid;
+	g_target.moving = t.moving;
+	g_target.angle_tenth = t.angle_tenth;
+	g_target.dist_cm = t.dist_cm;
+	g_target_seq = g_target_seq + 1;
 }
 
 int setupKW307() {
@@ -165,7 +136,8 @@ int setupKW307() {
 		return -1;
 	}
 
-    kw307_set_gain               (5);              /* +12 dB */
+    kw307_set_output_default();
+	kw307_set_gain               (5);              /* +12 dB */
 	kw307_set_detect_range       (50, 1000);       /* 0.5~10 m */
 	kw307_set_detect_fov         (120, 8);        /* 120 deg cone, shrink 8 deg/m */
 	kw307_set_motion_sensitivity    (2, 0);
@@ -212,7 +184,7 @@ int main()
 
 	sleep_ms(3000);
 
-	Head xHead(&servoB, &servoA);
+	Head xHead(&servoA, &servoB);
 	ArmWave xWaveLeft(&xLeft, 3);
 	ArmWave xWaveRight(&xRight, 3);
 	ArmHug xHugAnim(&xLeft, &xRight, 4);
@@ -226,129 +198,21 @@ int main()
 	BrainActors actors = { &xHead, &xStar, &xChase, &xHeart,
 			&xWakeAnim, &xLookAnim, &xWaveRight, &xDanceAnim, &xSleepAnim,
 			&xNodAnim, &xShakeAnim, &xWaveLeft, &xWaveRight };
+	Anim *anims[] = {
+			&xWaveLeft, &xWaveRight, &xHugAnim, &xNodAnim, &xShakeAnim,
+			&xLookAnim, &xDanceAnim, &xSleepAnim, &xWakeAnim, &xChase, &xHeart
+	};
 	SnowmanBrain xBrain(actors);
 	xBrain.start();
 
 	for (;;){
-		xBrain.updateSensor(g_human_flag != 0, g_target_dist_cm);
-		RadarTarget stat = { g_stat_valid != 0, g_stat_angle_tenth, g_stat_dist_cm };
-		RadarTarget mov0 = { g_mov_valid[0] != 0, g_mov_angle_tenth[0], g_mov_dist_cm[0] };
-		RadarTarget mov1 = { g_mov_valid[1] != 0, g_mov_angle_tenth[1], g_mov_dist_cm[1] };
-		xBrain.updateTargets(stat, mov0, mov1);
+		RadarTarget_t tgt = getTarget();
+		xBrain.updateSensor(tgt.valid, tgt.dist_cm);
+		xBrain.updateTarget(tgt);
 		xBrain.poll();
-		xWaveLeft.poll();
-		xWaveRight.poll();
-		xHugAnim.poll();
-		xNodAnim.poll();
-		xShakeAnim.poll();
-		xLookAnim.poll();
-		xDanceAnim.poll();
-		xSleepAnim.poll();
-		xWakeAnim.poll();
-		xChase.poll();
-		xHeart.poll();
-		sleep_ms(10);
-	}
-
-#if 0
-	Head xHead(&servoB, &servoA);
-	HeadNod xNod(&xHead, 3, true);
-	HeadShake xShake(&xHead, 3, true);
-	xShake.start();
-	for (;;){
-		xShake.poll();
-		sleep_ms(10);
-	}
-	xNod.start();
-	for (;;){
-		xNod.poll();
-		sleep_ms(10);
-	}
-
-	ArmHug xHug(&xLeft, &xRight, 4, true);
-	xHug.start();
-	for (;;){
-		xHug.poll();
-		sleep_ms(10);
-	}
-
-	//ArmWave xWave(&xLeft, 3, true);
-	ArmWave xWave(&xRight, 4, true);
-	xWave.start();
-	for (;;){
-		xWave.poll();
-		sleep_ms(10);
-	}
-#endif
-	float x, y, z;
-	for (;;){
-		float r;
-		for (int i=-1; i < 2; i ++){
-			r = M_PI / (i * 2.0);
-			if (i ==0){
-				r = 0.0;
-			}
-			xLeft.moveRad(
-							r,
-							1000,
-							ease_sin,
-							true);
-			xRight.moveRad(
-							r,
-							1000,
-							ease_sin,
-							true);
-			for (int j=0; j < 20; j++){
-				xLeft.getPos(x, y, z);
-				printf("Left %.2f at %.2f, %.2f, %.2f\n", r, x, y, z);
-				xRight.getPos(x, y, z);
-				printf("Right %.2f at %.2f, %.2f, %.2f\n", r, x, y, z);
-				sleep_ms(3000/20);
-			}
+		for (Anim *anim : anims){
+			anim->poll();
 		}
-	}
-
-
-
-
-
-    for (;;){
-    	for (int i=0; i < COLOUR_COUNT; i++){
-    		xStar.fill( colours[i] );
-    		xStar.show();
-
-    		switch (i%3){
-    		case 0:
-    			servo_time_to_deg(&servoD, 90.0, 1000000, ease_sin, NULL); //Right
-    			servo_time_to_deg(&servoC, 90.0, 1000000, ease_sin, NULL); //LEFT
-    			break;
-    		case 1:
-    			//Back
-    			servo_time_to_deg(&servoD, 60.0, 1000000, ease_sin, NULL);
-    			servo_time_to_deg(&servoC, 120.0, 1000000, ease_sin, NULL);
-    			break;
-    		default:
-    			//Forward
-    			servo_time_to_deg(&servoD, 150.0, 1000000, ease_sin, NULL);
-    			servo_time_to_deg(&servoC, 25.0, 1000000, ease_sin, NULL);
-    		}
-    		sleep_ms(500*6);
-    	}
-    }
-
-    for (;;){
-
-    	for (int i=0; i < POS_COUNT; i++){
-			servo_set_deg(&servoA, pos[i]);
-			servo_set_deg(&servoB, pos[i]);
-			sleep_ms(5000);
-    	}
-
-    	for (int i=0; i < POS_COUNT; i++){
-    		servo_time_to_deg(&servoA, pos[i], 1000000, NULL, NULL);
-    		servo_time_to_deg(&servoB, pos[i], 1000000, ease_in_expo, NULL);
-			sleep_ms(5000);
-    	}
-
+		sleep_ms(2);  // short tick: the LED animations step every 20 ms
 	}
 }

@@ -5,6 +5,7 @@
 #include "SnowmanBrain.h"
 #include <stdio.h>
 #include <math.h>
+#include <stdlib.h>
 
 #define NEAR_CM            150   // human is "near" inside this distance
 #define FAR_CM             200   // and "far" again beyond this (hysteresis)
@@ -15,20 +16,39 @@
 // Radar angle sign relative to head pan (positive pan is left). Set to -1.0f
 // if the head turns away from the target.
 #define RADAR_TO_PAN_SIGN   1.0f
-#define TURN_DEADBAND_RAD   0.09f  // ignore changes smaller than ~5 degrees
-#define TURN_MIN_INTERVAL_MS 400
-#define TURN_MOVE_MS        500
+#define NEG_ANGLE_GAIN      1.1f   // +10% on negative angles to compensate for weaker response that way
 #define TURN_MAX_RAD        0.7f
+// Stationary target: slow, smooth turn, never interrupting a turn in progress.
+#define LOOK_MOVE_MS        2000
+// Moving target: quick follow, as the SkullHead firmware does.
+#define FOLLOW_MOVE_MS      50
+#define FOLLOW_MIN_DIFF_RAD 0.01f
+#define FOLLOW_SETTLE_MS    300    // after this long without a move, fine-tune
+#define FOLLOW_SETTLE_RAD   0.001f
 #define FRONT_MAX_RAD       0.8f   // "in front" = within about 45 degrees
-#define STAT_HOLD_MS        2000   // keep a lost stationary target this long (radar flicker)
-#define STAT_TAU_MS         600    // angle smoothing for a stationary target
-#define MOV_HOLD_MS         1000   // keep a lost moving target this long
-#define MOV_TAU_MS          250    // lighter smoothing so moving targets are followed closely
-#define FOLLOW_DEADBAND_RAD 0.05f  // following uses finer, quicker moves than looking
-#define FOLLOW_MIN_INTERVAL_MS 150
-#define FOLLOW_MOVE_MS      250
+#define STAT_HOLD_MS        1000   // keep a lost stationary target this long (radar flicker)
 #define TELEMETRY_MS        1000   // periodic status print
-#define ATT_PAUSE_MS        2500   // quiet gap between gestures
+#define ATT_PAUSE_MS        2500   // gap between gestures when the target is under 1 m
+#define ATT_PAUSE_FAR_MS    15000  // gap at 3 m or more
+
+// Chase colour by target distance: >2 m green, 2-1 m green to blue,
+// 1-0.7 m blue to red, <0.7 m red.
+static PicoLed::Color distanceColour(uint16_t cm) {
+	auto mix = [](float f, int r0, int g0, int b0, int r1, int g1, int b1) {
+		return PicoLed::RGB((uint8_t)(r0 + (r1 - r0) * f), (uint8_t)(g0 + (g1 - g0) * f),
+				(uint8_t)(b0 + (b1 - b0) * f));
+	};
+	if (cm >= 200) {
+		return PicoLed::RGB(0, 255, 0);
+	}
+	if (cm >= 100) {
+		return mix((200 - cm) / 100.0f, 0, 255, 0, 0, 0, 255);
+	}
+	if (cm > 70) {
+		return mix((100 - cm) / 30.0f, 0, 0, 255, 255, 0, 0);
+	}
+	return PicoLed::RGB(255, 0, 0);
+}
 
 static const PicoLed::Color ChaseColour = PicoLed::RGB(116, 215, 238);
 static const PicoLed::Color HeartAwake = PicoLed::RGB(228, 3, 3);
@@ -170,10 +190,34 @@ SnowmanBrain::SnowmanBrain(const BrainActors &actors) :
 	xAttShake.on(EvAnimDone, &xAttPause);
 	xAttWave.on(EvAnimDone, &xAttPause);
 
-	// After each pause pick the next gesture in the sequence, using the previous state.
-	xAttPause.timeout(ATT_PAUSE_MS)
-		.on(EvTimeout, &xAttShake, [this](StateMachine &sm, const Event &) { return sm.previous() == &xAttNod; })
-		.on(EvTimeout, &xAttWave, [this](StateMachine &sm, const Event &) { return sm.previous() == &xAttShake; })
+	// The next gesture is chosen at random when the pause starts; shaking the
+	// head becomes much more likely when the target is closer than 1 m.
+	// Wait for the head to stop first (e.g. a slow tracking turn): starting a move
+	// on a busy servo would block the main loop and freeze the LED animations.
+	xAttPause.onEnter([this](StateMachine &sm) {
+			pAttNext = pickGesture();
+			xPauseStartMs = sm.nowMs();
+			// Under 1 m: normal rate. Beyond that the gap stretches linearly to
+			// ATT_PAUSE_FAR_MS at 3 m, with +/-25% jitter so it doesn't feel regular.
+			float far = 0.0f;
+			if (xTargetCm >= 300) {
+				far = 1.0f;
+			} else if (xTargetCm > 100) {
+				far = (xTargetCm - 100) / 200.0f;
+			}
+			float gap = ATT_PAUSE_MS + far * (ATT_PAUSE_FAR_MS - ATT_PAUSE_MS);
+			float jitter = 0.75f + 0.5f * ((float)(rand() % 1000) / 1000.0f);
+			xPauseMs = (uint32_t)(gap * (far > 0.0f ? jitter : 1.0f));
+			printf("Next gesture in %u ms (dist %ucm)\n", (unsigned)xPauseMs, xTargetCm);
+		})
+		.onTick([this](StateMachine &sm) {
+			if (sm.nowMs() - xPauseStartMs >= xPauseMs && !xA.head->isMoving()) {
+				sm.post(EvTimeout);
+			}
+		});
+	xAttPause
+		.on(EvTimeout, &xAttShake, [this](StateMachine &, const Event &) { return pAttNext == &xAttShake; })
+		.on(EvTimeout, &xAttWave, [this](StateMachine &, const Event &) { return pAttNext == &xAttWave; })
 		.on(EvTimeout, &xAttNod);
 
 	xEntertaining.onExit([this](StateMachine &sm) {
@@ -187,7 +231,22 @@ static float clampPan(float r) {
 }
 
 static float degToPan(float deg) {
-	return RADAR_TO_PAN_SIGN * deg * (float)M_PI / 180.0f;
+	float rad = RADAR_TO_PAN_SIGN * deg * (float)M_PI / 180.0f;
+	return rad < 0.0f ? rad * NEG_ANGLE_GAIN : rad;
+}
+
+State *SnowmanBrain::pickGesture() {
+	// Shake weight ramps from 1 at 1 m or more up to 8 at 0.7 m or less.
+	float near = 0.0f;
+	if (xTargetCm > 0 && xTargetCm < 100) {
+		near = xTargetCm <= 70 ? 1.0f : (100 - xTargetCm) / 30.0f;
+	}
+	float wNod = 4.0f, wShake = 1.0f + 7.0f * near, wWave = 3.0f;
+	float r = (float)(rand() % 1000) / 1000.0f * (wNod + wShake + wWave);
+	State *pick = r < wNod ? &xAttNod : (r < wNod + wShake ? &xAttShake : &xAttWave);
+	printf("Gesture: dist=%ucm weights nod=%.1f shake=%.1f wave=%.1f -> %s\n",
+			xTargetCm, wNod, wShake, wWave, pick->name());
+	return pick;
 }
 
 // Head pan angle that faces the stationary target (0 if none), clamped.
@@ -214,40 +273,48 @@ bool SnowmanBrain::animRunning() const {
 			|| xA.dance->isRunning() || xA.sleep->isRunning();
 }
 
-// Turn the head toward the tracked target, or back to centre if there is none.
+// Look at the stationary target if there is one, otherwise follow the nearest
+// moving target. With neither, the head stays where it is.
 void SnowmanBrain::faceTarget(StateMachine &sm) {
-	bool follow = xTrackMode == TrackMoving;
-	uint32_t interval = follow ? FOLLOW_MIN_INTERVAL_MS : TURN_MIN_INTERVAL_MS;
-	if (animRunning() || sm.nowMs() - xLastTurnMs < interval) {
+	if (xTrackMode == TrackNone || animRunning()) {
 		return;
 	}
+	uint32_t now = sm.nowMs();
 	float want = trackPanRad();
-	float deadband = follow ? FOLLOW_DEADBAND_RAD : TURN_DEADBAND_RAD;
-	if (want == xFacingRad || (want != 0.0f && fabsf(want - xFacingRad) < deadband)) {
-		return;
+	float diff = xFacingRad > 100.0f ? 1000.0f : fabsf(want - xFacingRad);
+	uint32_t sinceTurn = now - xLastTurnMs;
+	uint32_t ms;
+
+	if (xTrackMode == TrackStationary) {
+		if (sinceTurn < LOOK_MOVE_MS || diff < FOLLOW_SETTLE_RAD) {
+			return;
+		}
+		ms = LOOK_MOVE_MS;
+	} else {
+		bool far = diff > FOLLOW_MIN_DIFF_RAD;
+		bool settle = sinceTurn > FOLLOW_SETTLE_MS && diff > FOLLOW_SETTLE_RAD;
+		if (!far && !settle) {
+			return;
+		}
+		ms = FOLLOW_MOVE_MS;
 	}
-	printf("Turn(%s): target %.1f deg -> pan %.1f deg (was %.1f, head now %.1f) in %s\n",
-			xTrackMode == TrackStationary ? "stationary" : (follow ? "moving" : "centre"),
-			want * 180.0f / (float)M_PI / RADAR_TO_PAN_SIGN, want * 180.0f / (float)M_PI,
+	printf("Turn(%s): radar %.1f deg -> pan %.1f deg (was %.1f, head now %.1f) in %s\n",
+			xTrackMode == TrackStationary ? "stationary" : "moving",
+			xTrackMode == TrackStationary ? xStat.angleDeg : xMov.angleDeg,
+			want * 180.0f / (float)M_PI,
 			xFacingRad > 100.0f ? 0.0f : xFacingRad * 180.0f / (float)M_PI,
 			xA.head->getPanRad() * 180.0f / (float)M_PI, sm.current()->name());
 	xFacingRad = want;
-	xLastTurnMs = sm.nowMs();
+	xLastTurnMs = now;
 	xA.head->setPanBias(want);
-	xA.head->moveRad(0.0f, 0.0f, follow ? FOLLOW_MOVE_MS : TURN_MOVE_MS, ease_sin, true);
+	xA.head->movePanRad(0.0f, ms, xTrackMode == TrackStationary ? ease_sin : ease_in_expo, true);
 }
 
-void SnowmanBrain::updateHeld(Held &h, bool valid, int16_t angleTenth, uint16_t dist,
-		uint32_t now, uint32_t dtMs, uint32_t holdMs, uint32_t tauMs) {
+// Raw angle, no filtering. valid=false keeps the last angle for the hold time
+// so brief radar dropouts don't end the interaction.
+void SnowmanBrain::updateHeld(Held &h, bool valid, int16_t angleTenth, uint32_t now, uint32_t holdMs) {
 	if (valid) {
-		float raw = (float)angleTenth / 10.0f;
-		if (h.valid) {
-			float alpha = 1.0f - expf(-(float)dtMs / (float)tauMs);
-			h.angleDeg += alpha * (raw - h.angleDeg);
-		} else {
-			h.angleDeg = raw;
-		}
-		h.distanceCm = dist;
+		h.angleDeg = (float)angleTenth / 10.0f;
 		h.seenMs = now;
 		h.valid = true;
 	} else if (h.valid && now - h.seenMs >= holdMs) {
@@ -255,30 +322,23 @@ void SnowmanBrain::updateHeld(Held &h, bool valid, int16_t angleTenth, uint16_t 
 	}
 }
 
-void SnowmanBrain::updateTargets(const RadarTarget &stationary, const RadarTarget &moving0,
-		const RadarTarget &moving1) {
+void SnowmanBrain::updateTarget(const RadarTarget_t &target) {
 	uint32_t now = xSm.nowMs();
-	uint32_t dt = xLastUpdateMs ? now - xLastUpdateMs : 0;
-	xLastUpdateMs = now;
+
+	xTargetCm = target.valid ? target.dist_cm : 0;
+	if (target.valid && target.dist_cm > 0) {
+		xA.chase->setColour(distanceColour(target.dist_cm));
+	}
 
 	bool statWas = xStat.valid;
-	updateHeld(xStat, stationary.valid, stationary.angleTenth, stationary.distanceCm,
-			now, dt, STAT_HOLD_MS, STAT_TAU_MS);
+	updateHeld(xStat, target.valid && !target.moving, target.angle_tenth, now, STAT_HOLD_MS);
 	if (xStat.valid != statWas) {
 		printf("Stationary target %s (angle %.1f deg)\n", xStat.valid ? "FOUND" : "LOST", xStat.angleDeg);
 		xSm.post(xStat.valid ? EvTargetFound : EvTargetLost);
 	}
 
-	// Follow the nearest valid moving target.
-	const RadarTarget *m = nullptr;
-	for (const RadarTarget *t : { &moving0, &moving1 }) {
-		if (t->valid && (!m || (t->distanceCm > 0 && t->distanceCm < m->distanceCm))) {
-			m = t;
-		}
-	}
 	bool movWas = xMov.valid;
-	updateHeld(xMov, m != nullptr, m ? m->angleTenth : 0, m ? m->distanceCm : 0,
-			now, dt, MOV_HOLD_MS, MOV_TAU_MS);
+	updateHeld(xMov, target.valid && target.moving, target.angle_tenth, now, 0);
 	if (xMov.valid != movWas) {
 		printf("Moving target %s (angle %.1f deg)\n", xMov.valid ? "FOUND" : "LOST", xMov.angleDeg);
 	}
