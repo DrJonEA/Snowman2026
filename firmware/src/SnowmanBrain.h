@@ -118,7 +118,8 @@ private:
 	Held xMov;    // nearest moving target, latest frame only
 	TrackMode xTrackMode = TrackNone;
 	Anim *pAttWave = nullptr;
-	uint16_t xTargetCm = 0;      // distance to the current target, 0 = unknown
+	uint16_t xTargetCm = 0;      // distance to the current target (filtered by the radar callback), 0 = unknown
+	uint32_t xLastDistPrintMs = 0;
 	uint32_t xPauseStartMs = 0;
 	uint32_t xPauseMs = 0;       // gap before the next gesture, set from distance
 	State *pAttNext = nullptr;   // gesture chosen for after the pause

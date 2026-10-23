@@ -100,6 +100,46 @@ static RadarTarget_t getTarget(){
 	return t;
 }
 
+/* Distance filter, run per radar frame: a median over the last few frames
+ * throws out single-frame spikes (servo/supply noise), then a light exponential
+ * average smooths what is left. Latency is about 2 frames, so it stays responsive.
+ * History is cleared after a gap with no target. */
+#define DIST_MEDIAN_LEN   5
+#define DIST_EMA_ALPHA    0.5f
+#define DIST_GAP_FRAMES   10
+
+static uint16_t filterDistance(bool valid, uint16_t raw){
+	static uint16_t hist[DIST_MEDIAN_LEN];
+	static uint count = 0, next = 0, gap = 0;
+	static float smooth = 0.0f;
+
+	if (!valid || raw == 0) {
+		if (++gap >= DIST_GAP_FRAMES) {
+			count = 0;
+			next = 0;
+		}
+		return raw;
+	}
+	gap = 0;
+	hist[next] = raw;
+	next = (next + 1) % DIST_MEDIAN_LEN;
+	if (count < DIST_MEDIAN_LEN) {
+		count++;
+	}
+	uint16_t s[DIST_MEDIAN_LEN];
+	for (uint i = 0; i < count; i++) {
+		s[i] = hist[i];
+	}
+	for (uint i = 1; i < count; i++) {
+		for (uint j = i; j > 0 && s[j - 1] > s[j]; j--) {
+			uint16_t t = s[j]; s[j] = s[j - 1]; s[j - 1] = t;
+		}
+	}
+	float median = s[count / 2];
+	smooth = (count == 1) ? median : smooth + DIST_EMA_ALPHA * (median - smooth);
+	return (uint16_t)(smooth + 0.5f);
+}
+
 /* Fires on every radar frame. Keep short — heavy work belongs in main(). */
 static void on_radar(const KW307Frame_t* f){
 	/* Stationary target (state 1) wins; otherwise the nearest moving target
@@ -112,10 +152,11 @@ static void on_radar(const KW307Frame_t* f){
 			const auto &mv = f->moving[i];
 			if (mv.state == 1 && (!t.valid || (mv.distance_cm > 0 && mv.distance_cm < t.dist_cm))) {
 				t = {true, true, mv.angle_tenth, mv.distance_cm};
-				break;
 			}
 		}
 	}
+	t.dist_cm = filterDistance(t.valid, t.dist_cm);
+
 	g_target_seq = g_target_seq + 1;
 	g_target.valid = t.valid;
 	g_target.moving = t.moving;

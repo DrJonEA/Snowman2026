@@ -22,6 +22,8 @@
 #define LOOK_MOVE_MS        2000
 // Moving target: quick follow, as the SkullHead firmware does.
 #define FOLLOW_MOVE_MS      50
+#define STAT_DEADBAND_RAD   0.05f  // ignore radar jitter smaller than ~3 degrees when looking at a still target
+#define PAUSE_MOVE_WAIT_MS  2500   // longest wait for the head to stop before a gesture
 #define FOLLOW_MIN_DIFF_RAD 0.01f
 #define FOLLOW_SETTLE_MS    300    // after this long without a move, fine-tune
 #define FOLLOW_SETTLE_RAD   0.001f
@@ -131,17 +133,17 @@ SnowmanBrain::SnowmanBrain(const BrainActors &actors) :
 				xFacingRad = 1000.0f;
 			}
 		})
-		.on(EvHumanNear, &xGreeting, [this](StateMachine &sm, const Event &) { return canEngage(); })
+		.on(EvHumanNear, &xGreeting, [this](StateMachine &sm, const Event &) { return canEngage() && !targetInFront(); })
 		.on(EvTimeout, &xAsleep, [this](StateMachine &, const Event &) {
 			return !xHuman && !xStat.valid && !xMov.valid && xIdleCycles >= IDLE_CYCLES_SLEEP;
 		})
-		.on(EvTimeout, &xGreeting, [this](StateMachine &, const Event &) { return xNear && canEngage(); })
+		.on(EvTimeout, &xGreeting, [this](StateMachine &, const Event &) { return xNear && canEngage() && !targetInFront(); })
 		.on(EvTimeout, &xAttending, [this](StateMachine &, const Event &) { return targetInFront(); })
 		.on(EvTargetFound, &xAttending, [this](StateMachine &, const Event &) { return targetInFront(); })
 		.on(EvTimeout, &xLooking);
 
 	xLooking.onEnter([this](StateMachine &) { xIdleCycles++; })
-		.on(EvHumanNear, &xGreeting, [this](StateMachine &, const Event &) { return canEngage(); })
+		.on(EvHumanNear, &xGreeting, [this](StateMachine &, const Event &) { return canEngage() && !targetInFront(); })
 		.on(EvAnimDone, &xIdle);
 
 	// Greeting: dance if the human stayed near, otherwise carry on.
@@ -158,7 +160,7 @@ SnowmanBrain::SnowmanBrain(const BrainActors &actors) :
 		})
 		.onTick([this](StateMachine &sm) { faceTarget(sm); })
 		.on(EvTargetLost, &xIdle)
-		.on(EvHumanNear, &xGreeting, [this](StateMachine &, const Event &) { return canEngage(); });
+		.on(EvHumanNear, &xGreeting, [this](StateMachine &, const Event &) { return canEngage() && !targetInFront(); });
 
 	xAttNod.onEnter([this](StateMachine &) {
 		xA.nod->start();
@@ -211,7 +213,9 @@ SnowmanBrain::SnowmanBrain(const BrainActors &actors) :
 			printf("Next gesture in %u ms (dist %ucm)\n", (unsigned)xPauseMs, xTargetCm);
 		})
 		.onTick([this](StateMachine &sm) {
-			if (sm.nowMs() - xPauseStartMs >= xPauseMs && !xA.head->isMoving()) {
+			uint32_t waited = sm.nowMs() - xPauseStartMs;
+			bool ready = waited >= xPauseMs && (!xA.head->isMoving() || waited >= xPauseMs + PAUSE_MOVE_WAIT_MS);
+			if (ready) {
 				sm.post(EvTimeout);
 			}
 		});
@@ -286,7 +290,7 @@ void SnowmanBrain::faceTarget(StateMachine &sm) {
 	uint32_t ms;
 
 	if (xTrackMode == TrackStationary) {
-		if (sinceTurn < LOOK_MOVE_MS || diff < FOLLOW_SETTLE_RAD) {
+		if (sinceTurn < LOOK_MOVE_MS || diff < STAT_DEADBAND_RAD) {
 			return;
 		}
 		ms = LOOK_MOVE_MS;
@@ -326,8 +330,12 @@ void SnowmanBrain::updateTarget(const RadarTarget_t &target) {
 	uint32_t now = xSm.nowMs();
 
 	xTargetCm = target.valid ? target.dist_cm : 0;
-	if (target.valid && target.dist_cm > 0) {
-		xA.chase->setColour(distanceColour(target.dist_cm));
+	if (now - xLastDistPrintMs >= TELEMETRY_MS && target.valid) {
+		xLastDistPrintMs = now;
+		printf("Dist: %ucm (%s)\n", xTargetCm, target.moving ? "moving" : "stationary");
+	}
+	if (xTargetCm > 0) {
+		xA.chase->setColour(distanceColour(xTargetCm));
 	}
 
 	bool statWas = xStat.valid;
